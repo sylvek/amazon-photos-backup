@@ -58,6 +58,10 @@ type Fake struct {
 	ExpireAfter       int             // revoke the session after this many download requests (0 = never)
 	Forbidden         map[string]bool // node id → download answers 403
 	Stall             map[string]bool // node id → download sends half, then hangs
+	Flaky             map[string]bool // node id → every download returns different bytes
+	DownloadAuthAs403 bool            // a dead session answers 403 (not 401) on downloads
+	RejectYearsBefore int             // search answers 400 for timeYear filters below this year
+	StallAPI          bool            // API sends headers, then never finishes the body
 	BadRequests       int             // number of 400 answers given
 	Requests          []Request
 	Downloads         map[string]int // node id → completed content requests
@@ -77,6 +81,7 @@ func New(t TB) *Fake {
 		TruncateTimes: map[string]int{},
 		Forbidden:     map[string]bool{},
 		Stall:         map[string]bool{},
+		Flaky:         map[string]bool{},
 		Downloads:     map[string]int{},
 	}
 	f.api = httptest.NewServer(http.HandlerFunc(f.serveAPI))
@@ -139,6 +144,12 @@ func (f *Fake) RequestLog() []Request {
 	return append([]Request(nil), f.Requests...)
 }
 
+func (f *Fake) TotalRequests() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.Requests)
+}
+
 func (f *Fake) DownloadCount(id string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -195,6 +206,20 @@ func (f *Fake) serveAPI(w http.ResponseWriter, r *http.Request) {
 	if f.HTMLInsteadOfJSON {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, "<html>Please sign in</html>")
+		return
+	}
+	if !f.authed(r) && f.DownloadAuthAs403 && strings.HasSuffix(r.URL.Path, "/contentRedirection") {
+		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Forbidden"})
+		return
+	}
+	if f.StallAPI {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"count": 1, "data": [`))
+		w.(http.Flusher).Flush()
+		f.mu.Unlock()
+		<-r.Context().Done()
+		f.mu.Lock()
 		return
 	}
 	if !f.authed(r) {
@@ -275,6 +300,10 @@ func (f *Fake) search(w http.ResponseWriter, q url.Values) {
 		case "type":
 		case "timeYear":
 			year = n
+			if n < f.RejectYearsBefore {
+				f.bad(w, "invalid value for timeYear")
+				return
+			}
 		case "timeMonth":
 			month = n
 		case "timeDay":
@@ -336,6 +365,13 @@ func (f *Fake) serveCDN(w http.ResponseWriter, r *http.Request) {
 	if f.Truncate[id] {
 		w.Write(content[:len(content)/2])
 		panic(http.ErrAbortHandler) // drop the connection mid-body
+	}
+	if f.Flaky[id] {
+		f.Downloads[id]++
+		content = append(append([]byte{}, content...), []byte(strconv.Itoa(f.Downloads[id]))...)
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		w.Write(content)
+		return
 	}
 	if f.Stall[id] {
 		w.Write(content[:len(content)/2])

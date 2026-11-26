@@ -249,16 +249,219 @@ func TestSyncRetriesInterruptedDownload(t *testing.T) {
 	}
 }
 
-func TestSyncBadMD5Fails(t *testing.T) {
+func TestSyncConsistentMismatchIsKeptOnce(t *testing.T) {
+	// Amazon announces one checksum but reliably serves other bytes. Throwing
+	// the file away would mean never backing it up and fetching it forever.
+	e := newEnv(t)
+	e.fake.AddNode("id-a", "a.jpg", "2023-05-01T10:00:00Z", []byte("announced"))
+	e.fake.SetContent("id-a", []byte("what amazon really serves"))
+	res := e.mustRun()
+	if res.Downloaded != 1 || res.Mismatched != 1 || res.Failed != 0 {
+		t.Fatalf("%+v", res)
+	}
+	if e.read("2023/05/a.jpg") != "what amazon really serves" {
+		t.Errorf("served bytes were not kept")
+	}
+	if n := e.fake.DownloadCount("id-a"); n != 2 {
+		t.Errorf("%d downloads, want 2 (one to notice, one to confirm)", n)
+	}
+	if res := e.mustRun(); res.Downloaded != 0 || res.Skipped != 1 {
+		t.Fatalf("second run: %+v", res)
+	}
+	if n := e.fake.DownloadCount("id-a"); n != 2 {
+		t.Errorf("file fetched again on the next run: %d downloads", n)
+	}
+}
+
+func TestSyncInconsistentDownloadsFail(t *testing.T) {
+	// Two downloads that disagree with the checksum and with each other
+	// are corruption, not a metadata quirk.
 	e := newEnv(t)
 	e.fake.AddNode("id-a", "a.jpg", "2023-05-01T10:00:00Z", []byte("expected"))
-	e.fake.SetContent("id-a", []byte("tampered")) // same length, different bytes
+	e.fake.Flaky["id-a"] = true
 	res := e.mustRun()
 	if res.Failed != 1 || res.Downloaded != 0 {
 		t.Fatalf("%+v", res)
 	}
 	if files := e.files(); len(files) != 0 {
 		t.Errorf("a corrupt download was kept: %v", files)
+	}
+	if n := e.fake.DownloadCount("id-a"); n != 2 {
+		t.Errorf("%d downloads, want exactly 2", n)
+	}
+}
+
+func TestSyncPartSiblingNotDestroyed(t *testing.T) {
+	e := newEnv(t)
+	e.fake.AddNode("id-part", "IMG.jpg.part", "2023-05-01T10:00:00Z", []byte("a real file that happens to end in .part"))
+	e.mustRun()
+	e.fake.AddNode("id-img", "IMG.jpg", "2023-05-02T10:00:00Z", []byte("the photo"))
+	// Even if Amazon lost the first item, our copy must survive the second download.
+	e.fake.Update(func(f *amazontest.Fake) { f.Nodes = f.Nodes[1:] })
+	e.mustRun()
+	if got := e.read("2023/05/IMG.jpg.part"); got != "a real file that happens to end in .part" {
+		t.Errorf("backed-up file was damaged while downloading its sibling: %q", got)
+	}
+	if e.read("2023/05/IMG.jpg") != "the photo" {
+		t.Errorf("sibling not downloaded")
+	}
+}
+
+func TestSyncForeignPartFileUntouched(t *testing.T) {
+	e := newEnv(t)
+	e.fake.AddNode("id-a", "a.jpg", "2023-05-01T10:00:00Z", bytes.Repeat([]byte("A"), 50000))
+	os.MkdirAll(filepath.Join(e.dir, "2023", "05"), 0o755)
+	os.WriteFile(filepath.Join(e.dir, "2023", "05", "a.jpg.part"), []byte("someone else's file"), 0o644)
+	e.fake.Truncate["id-a"] = true
+	e.mustRun() // fails
+	if e.read("2023/05/a.jpg.part") != "someone else's file" {
+		t.Fatalf("a failed download deleted or changed an unrelated file")
+	}
+	e.fake.Update(func(f *amazontest.Fake) { delete(f.Truncate, "id-a") })
+	if res := e.mustRun(); res.Downloaded != 1 {
+		t.Fatalf("%+v", res)
+	}
+	if e.read("2023/05/a.jpg.part") != "someone else's file" {
+		t.Errorf("a successful download deleted or changed an unrelated file")
+	}
+	for _, f := range e.files() {
+		if strings.Contains(f, ".dl-") {
+			t.Errorf("temporary file left behind: %s", f)
+		}
+	}
+}
+
+func TestSyncCaseOnlyCollisionGetsDistinctNames(t *testing.T) {
+	// On a case-insensitive disk (macOS, Windows hosts) these two names are
+	// one file. They must be told apart before any byte is written.
+	e := newEnv(t)
+	e.fake.AddNode("AAAAaaaa1111", "IMG_0001.JPG", "2023-05-01T10:00:00Z", []byte("upper"))
+	e.fake.AddNode("BBBBbbbb2222", "IMG_0001.jpg", "2023-05-02T10:00:00Z", []byte("lower"))
+	if res := e.mustRun(); res.Downloaded != 2 {
+		t.Fatalf("%+v", res)
+	}
+	files := e.files()
+	if len(files) != 2 || strings.EqualFold(files[0], files[1]) {
+		t.Fatalf("names differ only by case: %v", files)
+	}
+	if res := e.mustRun(); res.Downloaded != 0 || res.Skipped != 2 {
+		t.Errorf("second run: %+v", res)
+	}
+}
+
+func TestSyncItemWithoutSizeNotRedownloaded(t *testing.T) {
+	e := newEnv(t)
+	e.fake.AddNode("id-a", "a.jpg", "2023-05-01T10:00:00Z", []byte("AAA"))
+	e.fake.AddNode("id-b", "b.jpg", "2023-05-01T10:00:00Z", []byte("BBB"))
+	e.fake.Update(func(f *amazontest.Fake) {
+		f.Nodes[0].Content.Size = 0 // size unknown
+		f.Nodes[1].Content.Size = 0 // neither size nor checksum
+		f.Nodes[1].Content.MD5 = ""
+	})
+	if res := e.mustRun(); res.Downloaded != 2 {
+		t.Fatalf("%+v", res)
+	}
+	for i := 0; i < 2; i++ {
+		if res := e.mustRun(); res.Downloaded != 0 || res.Skipped != 2 {
+			t.Fatalf("run %d: %+v", i+2, res)
+		}
+	}
+	if got, want := e.files(), []string{"2023/05/a.jpg", "2023/05/b.jpg"}; !equal(got, want) {
+		t.Errorf("files = %v, want %v", got, want)
+	}
+}
+
+func TestSyncLocalWriteErrorIsFatal(t *testing.T) {
+	// A backup directory that cannot be written (full disk, read-only
+	// volume) must stop the run loudly, not count every file as "failed".
+	e := newEnv(t)
+	for _, id := range []string{"n0", "n1", "n2", "n3", "n4", "n5"} {
+		e.fake.AddNode(id, id+".jpg", "2023-05-01T10:00:00Z", []byte("content "+id))
+	}
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	os.WriteFile(blocker, nil, 0o644)
+	e.dir = filepath.Join(blocker, "photos")
+	_, err := e.run(1)
+	if err == nil || errors.Is(err, amazon.ErrAuth) {
+		t.Fatalf("got %v, want a fatal local error", err)
+	}
+	if n := countDownloadRequests(e.fake); n > 1 {
+		t.Errorf("%d download requests made although nothing can be written", n)
+	}
+}
+
+func countDownloadRequests(f *amazontest.Fake) int {
+	n := 0
+	for _, r := range f.RequestLog() {
+		if strings.HasSuffix(r.Path, "/contentRedirection") {
+			n++
+		}
+	}
+	return n
+}
+
+func addForbidden(e *env, prefix string, n int, date string) {
+	for i := 0; i < n; i++ {
+		id := prefix + string(rune('a'+i/26)) + string(rune('a'+i%26))
+		e.fake.AddNode(id, id+".jpg", date, []byte("content "+id))
+		e.fake.Forbidden[id] = true
+	}
+}
+
+func TestSyncBreakerAbortsOnSystemicFailure(t *testing.T) {
+	e := newEnv(t)
+	addForbidden(e, "bad", 60, "2023-05-01T10:00:00Z")
+	_, err := e.run(1)
+	if err == nil || errors.Is(err, amazon.ErrAuth) {
+		t.Fatalf("got %v, want an error: every download is being refused", err)
+	}
+	if n := countDownloadRequests(e.fake); n != 20 {
+		t.Errorf("%d download requests before giving up, want 20", n)
+	}
+}
+
+func TestSyncBreakerDetectsDeadSession(t *testing.T) {
+	// The session dies mid-run, and Amazon answers 403 instead of 401.
+	e := newEnv(t)
+	for i := 0; i < 60; i++ {
+		id := "n" + string(rune('a'+i/26)) + string(rune('a'+i%26))
+		e.fake.AddNode(id, id+".jpg", "2023-05-01T10:00:00Z", []byte("content "+id))
+	}
+	e.fake.DownloadAuthAs403 = true
+	e.fake.ExpireAfter = 2
+	res, err := e.run(1)
+	if !errors.Is(err, amazon.ErrAuth) {
+		t.Fatalf("got %v, want ErrAuth", err)
+	}
+	if res.Downloaded != 2 {
+		t.Errorf("%+v", res)
+	}
+	if n := countDownloadRequests(e.fake); n != 22 {
+		t.Errorf("%d download requests, want 22 (2 good + 20 refused)", n)
+	}
+}
+
+func TestSyncKnownBadItemsDoNotBlockOthers(t *testing.T) {
+	e := newEnv(t)
+	addForbidden(e, "bad", 25, "2024-01-01T10:00:00Z") // newest, so tried first
+	for _, id := range []string{"g0", "g1", "g2", "g3", "g4"} {
+		e.fake.AddNode(id, id+".jpg", "2020-05-01T10:00:00Z", []byte("content "+id))
+	}
+	if _, err := e.run(1); err == nil {
+		t.Fatalf("first run should trip on 20 refusals in a row")
+	}
+	// Items that already failed are tried last and are not held against the run.
+	res, err := e.run(1)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if res.Downloaded != 5 || res.Failed != 25 {
+		t.Fatalf("second run: %+v, want the 5 good files saved", res)
+	}
+	// Once Amazon serves them again, they are picked up and forgotten as bad.
+	e.fake.Update(func(f *amazontest.Fake) { f.Forbidden = map[string]bool{} })
+	if res, err := e.run(1); err != nil || res.Downloaded != 25 || res.Failed != 0 {
+		t.Fatalf("after recovery: %+v err=%v", res, err)
 	}
 }
 

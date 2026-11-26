@@ -84,6 +84,10 @@ func run(args []string) int {
 
 	case "once":
 		res, err := daemon.Once(ctx, cfg, log)
+		if errors.Is(err, daemon.ErrBusy) {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
 		if err != nil {
 			return 1 // already logged
 		}
@@ -167,6 +171,9 @@ func printStatus(cfg daemon.Config) int {
 	r := st.LastResult
 	fmt.Printf("Last result:     %d remote, %d downloaded (%.1f MB), %d already saved, %d adopted, %d failed, %d unreachable\n",
 		r.Remote, r.Downloaded, float64(r.Bytes)/1e6, r.Skipped, r.Adopted, r.Failed, r.Unreachable)
+	if r.Mismatched > 0 {
+		fmt.Printf("                 %d saved although Amazon's checksum disagrees with the bytes it serves (see logs)\n", r.Mismatched)
+	}
 	if st.LastError != "" {
 		fmt.Printf("Last error:      %s\n", st.LastError)
 	}

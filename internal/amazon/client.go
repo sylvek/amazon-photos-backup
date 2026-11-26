@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,8 @@ type Options struct {
 	// IdleTimeout aborts a download that receives no data for this long;
 	// default 2 minutes.
 	IdleTimeout time.Duration
+	// APITimeout bounds one metadata call, body included; default 2 minutes.
+	APITimeout time.Duration
 }
 
 type Client struct {
@@ -60,6 +63,7 @@ type Client struct {
 	retries   int
 	retryBase time.Duration
 	idle      time.Duration
+	apiLimit  time.Duration
 	allowed   func(*url.URL) bool
 
 	rootMu sync.Mutex
@@ -84,6 +88,33 @@ type ContentProperties struct {
 	ContentType string `json:"contentType"`
 	Extension   string `json:"extension"`
 	ContentDate string `json:"contentDate"`
+}
+
+// UnmarshalJSON accepts the size as a number or as a string: the API is
+// undocumented, and one surprising type must not make an item unreadable.
+func (p *ContentProperties) UnmarshalJSON(data []byte) error {
+	type plain ContentProperties
+	aux := struct {
+		*plain
+		Size json.RawMessage `json:"size"`
+	}{plain: (*plain)(p)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	p.Size = flexInt(aux.Size)
+	return nil
+}
+
+// flexInt reads 123, "123" or 123.0; anything else counts as unknown (0).
+func flexInt(raw json.RawMessage) int64 {
+	text := strings.Trim(strings.TrimSpace(string(raw)), `"`)
+	if n, err := strconv.ParseInt(text, 10, 64); err == nil {
+		return n
+	}
+	if f, err := strconv.ParseFloat(text, 64); err == nil && f >= 0 && f < 1<<62 {
+		return int64(f)
+	}
+	return 0
 }
 
 func NewClient(o Options) (*Client, error) {
@@ -114,6 +145,10 @@ func NewClient(o Options) (*Client, error) {
 	c.idle = o.IdleTimeout
 	if c.idle <= 0 {
 		c.idle = 2 * time.Minute
+	}
+	c.apiLimit = o.APITimeout
+	if c.apiLimit <= 0 {
+		c.apiLimit = 2 * time.Minute
 	}
 	j := &jar{store: o.Store, domain: domain}
 	c.allowed = j.allowed
@@ -218,6 +253,8 @@ func baseParams() url.Values {
 
 // getJSON calls a /drive/v1 endpoint and decodes its JSON answer.
 func (c *Client) getJSON(ctx context.Context, path string, params url.Values, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, c.apiLimit)
+	defer cancel()
 	q := baseParams()
 	for k, v := range params {
 		q[k] = v
@@ -231,7 +268,7 @@ func (c *Client) getJSON(ctx context.Context, path string, params url.Values, ou
 		return fmt.Errorf("GET %s: HTTP 403 %s: %w", path, snippet(resp.Body), ErrAuth)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: HTTP %d %s", path, resp.StatusCode, snippet(resp.Body))
+		return &StatusError{Op: "GET " + path, Code: resp.StatusCode, Body: snippet(resp.Body)}
 	}
 	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "json") {
 		// An expired session can answer 200 with the sign-in page.
@@ -243,33 +280,76 @@ func (c *Client) getJSON(ctx context.Context, path string, params url.Values, ou
 	return nil
 }
 
+// rawList is a page of nodes as received; nodeList is the same page with
+// each node decoded on its own, so that one malformed item is skipped
+// instead of failing the page.
+type rawList struct {
+	Count json.RawMessage   `json:"count"`
+	Data  []json.RawMessage `json:"data"`
+}
+
 type nodeList struct {
-	Count int    `json:"count"`
-	Data  []Node `json:"data"`
+	Count     int    // items Amazon says match the query
+	Data      []Node // items of this page that could be decoded
+	Raw       int    // items of this page as sent, decodable or not
+	Malformed int
+}
+
+func (c *Client) getNodes(ctx context.Context, path string, params url.Values) (nodeList, error) {
+	var raw rawList
+	if err := c.getJSON(ctx, path, params, &raw); err != nil {
+		return nodeList{}, err
+	}
+	list := nodeList{Count: int(flexInt(raw.Count)), Raw: len(raw.Data)}
+	for _, item := range raw.Data {
+		var n Node
+		if err := json.Unmarshal(item, &n); err != nil || n.ID == "" {
+			list.Malformed++
+			continue
+		}
+		list.Data = append(list.Data, n)
+	}
+	return list, nil
+}
+
+func (c *Client) fetchRoot(ctx context.Context) (Node, error) {
+	list, err := c.getNodes(ctx, "/nodes", url.Values{"filters": {"isRoot:true"}})
+	if err != nil {
+		return Node{}, err
+	}
+	if len(list.Data) == 0 {
+		return Node{}, errors.New("amazon: no root node in response")
+	}
+	return list.Data[0], nil
 }
 
 // Root returns the account's root folder; its ownerId is needed for
-// downloads. It also serves as the cheapest check that the session works.
+// downloads. The answer is cached for the life of the client.
 func (c *Client) Root(ctx context.Context) (Node, error) {
 	c.rootMu.Lock()
 	defer c.rootMu.Unlock()
 	if c.root != nil {
 		return *c.root, nil
 	}
-	var list nodeList
-	if err := c.getJSON(ctx, "/nodes", url.Values{"filters": {"isRoot:true"}}, &list); err != nil {
+	root, err := c.fetchRoot(ctx)
+	if err != nil {
 		return Node{}, err
 	}
-	if len(list.Data) == 0 {
-		return Node{}, errors.New("amazon: no root node in response")
-	}
-	c.root = &list.Data[0]
-	return *c.root, nil
+	c.root = &root
+	return root, nil
+}
+
+// Check asks Amazon, without any cache, whether the session still works.
+func (c *Client) Check(ctx context.Context) error {
+	_, err := c.fetchRoot(ctx)
+	return err
 }
 
 // KeepAlive loads the Amazon Photos page like a browser would, which gives
 // Amazon the opportunity to refresh the session cookies.
 func (c *Client) KeepAlive(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, c.apiLimit)
+	defer cancel()
 	resp, err := c.get(ctx, "/photos/", nil, "text/html,application/xhtml+xml")
 	if err != nil {
 		return err

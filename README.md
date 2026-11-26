@@ -127,7 +127,15 @@ Variables d'environnement, à régler dans `docker-compose.yml` :
 - **Incrémental** : un fichier déjà sauvegardé n'est jamais retéléchargé.
 - **Vérifié** : chaque téléchargement est contrôlé (taille et MD5 annoncés par
   Amazon) avant de recevoir son nom définitif. Un téléchargement interrompu ne
-  laisse aucun fichier.
+  laisse pas de fichier incomplet sous un nom de photo (après une coupure de
+  courant, il peut rester un fichier caché `.dl-…`, sans danger, à supprimer).
+  Si Amazon sert deux fois de suite les mêmes octets alors qu'ils ne
+  correspondent pas au MD5 annoncé, le fichier est conservé et signalé
+  (`mismatched`) plutôt que jeté.
+- **Prudent en cas de panne** : disque plein ou volume en lecture seule
+  arrêtent la sauvegarde avec une erreur, au lieu de compter chaque fichier
+  comme « échoué ». Si 20 téléchargements échouent d'affilée, la passe
+  s'arrête et l'état passe à `error`.
 - **Jamais destructeur** : rien n'est supprimé ni écrasé en local. Une photo
   supprimée sur Amazon reste dans la sauvegarde. Si deux photos portent le
   même nom, ou si une photo est modifiée sur Amazon, la nouvelle est rangée à

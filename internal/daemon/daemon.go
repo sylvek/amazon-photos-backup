@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"amazon-photos-backup/internal/amazon"
@@ -57,6 +58,30 @@ func Login(cfg Config, r io.Reader, w io.Writer) error {
 	return nil
 }
 
+// ErrBusy means another process is already backing up into the same state
+// directory.
+var ErrBusy = errors.New("another backup is already running on this data directory")
+
+// lockState takes an exclusive, non-blocking lock for the duration of one
+// cycle, so that the daemon and a manual `once` never write the same files.
+func lockState(cfg Config) (release func(), err error) {
+	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(cfg.StateDir+"/lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrBusy
+		}
+		return nil, err
+	}
+	return func() { f.Close() }, nil
+}
+
 // Daemon runs backup cycles forever.
 type Daemon struct {
 	Config   Config
@@ -98,7 +123,6 @@ func (d *Daemon) init() {
 	if prev.State == StateAuthRequired || prev.State == StateError {
 		d.status.State = prev.State
 	}
-	d.saveStatus()
 }
 
 func (d *Daemon) saveStatus() {
@@ -110,6 +134,7 @@ func (d *Daemon) saveStatus() {
 
 func (d *Daemon) Run(ctx context.Context) error {
 	d.init()
+	d.saveStatus()
 	d.Log.Info("backup daemon started", "backup_dir", d.Config.BackupDir, "interval", d.Config.Interval.String())
 	for {
 		_, err := d.runCycle(ctx)
@@ -118,6 +143,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return nil
 		}
 		switch {
+		case errors.Is(err, ErrBusy):
+			d.Log.Warn("another backup is running on this data directory; waiting")
+			sleep(ctx, min(d.Config.Interval, time.Minute))
 		case errors.Is(err, amazon.ErrAuth):
 			d.waitForCookies(ctx)
 		case err != nil:
@@ -168,6 +196,14 @@ func (d *Daemon) waitForCookies(ctx context.Context) {
 
 // runCycle runs one cycle and records the outcome in the status file.
 func (d *Daemon) runCycle(ctx context.Context) (backup.Result, error) {
+	release, err := lockState(d.Config)
+	if err != nil {
+		// Not ours to report on: the status file belongs to whoever holds
+		// the lock.
+		return backup.Result{}, err
+	}
+	defer release()
+
 	// While a failure is outstanding the state keeps saying so; "syncing"
 	// would hide it from the healthcheck during every retry.
 	if d.status.State != StateAuthRequired && d.status.State != StateError {
@@ -198,6 +234,9 @@ func (d *Daemon) runCycle(ctx context.Context) (backup.Result, error) {
 			d.status.State = StateDegraded
 			d.status.LastError = fmt.Sprintf("%d items failed to download, %d could not be listed", res.Failed, res.Unreachable)
 		}
+		if res.Mismatched > 0 {
+			d.Log.Warn("some files were saved although their content differs from Amazon's checksum", "count", res.Mismatched)
+		}
 		d.status.LastSuccess = time.Now().UTC()
 		d.status.LastResult = res
 		d.status.Notified = ""
@@ -214,9 +253,10 @@ func (d *Daemon) fail(state string, err error, res backup.Result, title, message
 	if res.Downloaded > 0 {
 		d.status.LastResult = res
 	}
-	if d.status.Notified != state {
+	// Remembered only once delivered: an alert lost to a webhook hiccup is
+	// sent again at the next attempt instead of never.
+	if d.status.Notified != state && d.notify(title, message) {
 		d.status.Notified = state
-		d.notify(title, message)
 	}
 	d.saveStatus()
 }
@@ -284,26 +324,28 @@ func (d *Daemon) cycle(ctx context.Context) (backup.Result, error) {
 	return res, err
 }
 
-// notify posts a plain-text message to NOTIFY_URL (ntfy-compatible). The
-// message never contains cookies.
-func (d *Daemon) notify(title, message string) {
+// notify posts a plain-text message to NOTIFY_URL (ntfy-compatible) and
+// reports whether it was delivered. The message never contains cookies.
+func (d *Daemon) notify(title, message string) bool {
 	if d.Config.NotifyURL == "" {
-		return
+		return true // nothing to deliver
 	}
 	req, err := http.NewRequest(http.MethodPost, d.Config.NotifyURL, strings.NewReader(message))
 	if err != nil {
 		d.Log.Error("notification failed", "err", err)
-		return
+		return false
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	req.Header.Set("Title", title)
 	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 	if err != nil {
-		d.Log.Error("notification failed", "err", err)
-		return
+		d.Log.Error("notification failed; it will be sent again at the next attempt", "err", err)
+		return false
 	}
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		d.Log.Error("notification rejected", "status", resp.StatusCode)
+		d.Log.Error("notification rejected; it will be sent again at the next attempt", "status", resp.StatusCode)
+		return false
 	}
+	return true
 }

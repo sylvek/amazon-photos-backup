@@ -7,15 +7,20 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
 // Entry records where a remote item was saved and which content it had.
 type Entry struct {
-	Path       string    `json:"path"` // relative to the backup directory, slash-separated
-	MD5        string    `json:"md5"`
-	Size       int64     `json:"size"`
+	Path       string `json:"path"` // relative to the backup directory, slash-separated
+	MD5        string `json:"md5"`  // checksum announced by Amazon
+	Size       int64  `json:"size"` // bytes on disk
+	RemoteSize int64  `json:"remote_size,omitempty"`
+	// LocalMD5 is set only when Amazon consistently served bytes that do
+	// not match the checksum it announced.
+	LocalMD5   string    `json:"local_md5,omitempty"`
 	Name       string    `json:"name"`
 	Downloaded time.Time `json:"downloaded"`
 }
@@ -25,20 +30,26 @@ type Entry struct {
 type Index struct {
 	path string
 
-	mu      sync.Mutex
-	entries map[string]Entry
-	owners  map[string]string // path → node id
-	dirty   bool
+	mu       sync.Mutex
+	entries  map[string]Entry
+	owners   map[string]string // case-folded path → node id
+	failures map[string]int    // node id → runs in which its download failed
+	dirty    bool
 }
 
 type indexFile struct {
-	Version int              `json:"version"`
-	Entries map[string]Entry `json:"entries"`
+	Version  int              `json:"version"`
+	Entries  map[string]Entry `json:"entries"`
+	Failures map[string]int   `json:"failures,omitempty"`
 }
+
+// pathKey folds case, so that two names a case-insensitive disk would
+// merge are treated as the same destination everywhere.
+func pathKey(path string) string { return strings.ToLower(path) }
 
 // LoadIndex reads the index, or starts an empty one if the file is missing.
 func LoadIndex(path string) (*Index, error) {
-	idx := &Index{path: path, entries: map[string]Entry{}, owners: map[string]string{}}
+	idx := &Index{path: path, entries: map[string]Entry{}, owners: map[string]string{}, failures: map[string]int{}}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return idx, nil
@@ -52,7 +63,10 @@ func LoadIndex(path string) (*Index, error) {
 	}
 	for id, e := range f.Entries {
 		idx.entries[id] = e
-		idx.owners[e.Path] = id
+		idx.owners[pathKey(e.Path)] = id
+	}
+	for id, n := range f.Failures {
+		idx.failures[id] = n
 	}
 	return idx, nil
 }
@@ -74,15 +88,32 @@ func (i *Index) Get(id string) (Entry, bool) {
 func (i *Index) Owner(path string) (string, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	id, ok := i.owners[path]
+	id, ok := i.owners[pathKey(path)]
 	return id, ok
 }
 
+// Set records a saved file; the item is no longer considered failing.
 func (i *Index) Set(id string, e Entry) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.entries[id] = e
-	i.owners[e.Path] = id
+	i.owners[pathKey(e.Path)] = id
+	delete(i.failures, id)
+	i.dirty = true
+}
+
+// Failures is the number of runs in which this item's download failed
+// since it last succeeded.
+func (i *Index) Failures(id string) int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.failures[id]
+}
+
+func (i *Index) MarkFailed(id string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.failures[id]++
 	i.dirty = true
 }
 
@@ -93,7 +124,7 @@ func (i *Index) Save() error {
 	if !i.dirty {
 		return nil
 	}
-	data, err := json.Marshal(indexFile{Version: 1, Entries: i.entries})
+	data, err := json.Marshal(indexFile{Version: 1, Entries: i.entries, Failures: i.failures})
 	if err != nil {
 		return err
 	}

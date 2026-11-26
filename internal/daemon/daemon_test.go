@@ -400,3 +400,38 @@ func TestPreflightExplainsUnwritableDirs(t *testing.T) {
 		t.Errorf("got %v, want an error naming %s", err, cfg.BackupDir)
 	}
 }
+
+func TestNotifyRetriedWhenWebhookDown(t *testing.T) {
+	// An alert lost because the webhook hiccuped would make the expiry silent.
+	var calls atomic.Int32
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 2 {
+			http.Error(w, "down", http.StatusBadGateway)
+		}
+	}))
+	defer hook.Close()
+	f := amazontest.New(t)
+	cfg := testConfig(t, f)
+	cfg.NotifyURL = hook.URL
+	startDaemon(t, cfg) // no cookies: auth_required, retried every interval
+	waitFor(t, "a delivered notification", func() bool { return calls.Load() >= 3 })
+	time.Sleep(200 * time.Millisecond)
+	if n := calls.Load(); n != 3 {
+		t.Errorf("%d webhook calls, want 3 (two failures, one delivery, then silence)", n)
+	}
+}
+
+func TestConcurrentBackupRefused(t *testing.T) {
+	// `once` started while the daemon is syncing must not write the same files.
+	f := amazontest.New(t)
+	f.AddNode("id-a", "a.jpg", "2023-05-01T10:00:00Z", bytes.Repeat([]byte("A"), 100000))
+	f.Stall["id-a"] = true // keeps the first run busy
+	cfg := testConfig(t, f)
+	login(t, cfg, f.Cookies())
+	startDaemon(t, cfg)
+	waitFor(t, "daemon downloading", func() bool { return f.TotalRequests() > 3 })
+	_, err := Once(context.Background(), cfg, quiet)
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("got %v, want ErrBusy", err)
+	}
+}
