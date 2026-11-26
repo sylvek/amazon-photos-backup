@@ -42,13 +42,17 @@ type Fake struct {
 	Content           map[string][]byte
 	OwnerID           string
 	ValidAT           string
-	RotateSessionID   bool           // every response sets a new session-id cookie
-	SigninRedirect    bool           // unauthenticated calls redirect to /ap/signin instead of 401
-	HTMLInsteadOfJSON bool           // API answers 200 text/html, as an expired session can
-	Fail503           int            // next N API calls answer 503
-	FailDownloads     map[string]int // node id → number of 503s before content is served
-	Truncate          map[string]bool
+	RotateSessionID   bool            // every response sets a new session-id cookie
+	SigninRedirect    bool            // unauthenticated calls redirect to /ap/signin instead of 401
+	HTMLInsteadOfJSON bool            // API answers 200 text/html, as an expired session can
+	Fail503           int             // next N API calls answer 503
+	FailDownloads     map[string]int  // node id → number of 503s before content is served
+	Truncate          map[string]bool // node id → every download is cut mid-body
+	TruncateTimes     map[string]int  // node id → number of downloads cut mid-body before one succeeds
+	ExpireAfter       int             // revoke the session after this many download requests (0 = never)
 	Forbidden         map[string]bool // node id → download answers 403
+	Stall             map[string]bool // node id → download sends half, then hangs
+	BadRequests       int             // number of 400 answers given
 	Requests          []Request
 	Downloads         map[string]int // node id → completed content requests
 	rotations         int
@@ -64,7 +68,9 @@ func New(t testing.TB) *Fake {
 		ValidAT:       "valid-token",
 		FailDownloads: map[string]int{},
 		Truncate:      map[string]bool{},
+		TruncateTimes: map[string]int{},
 		Forbidden:     map[string]bool{},
+		Stall:         map[string]bool{},
 		Downloads:     map[string]int{},
 	}
 	f.api = httptest.NewServer(http.HandlerFunc(f.serveAPI))
@@ -199,14 +205,14 @@ func (f *Fake) serveAPI(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if q.Get(k) != v {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"message": "missing base param " + k})
+			f.bad(w, "missing base param "+k)
 			return
 		}
 	}
 	switch {
 	case r.URL.Path == "/drive/v1/nodes":
 		if q.Get("filters") != "isRoot:true" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"message": "unsupported filter"})
+			f.bad(w, "unsupported filter")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"count": 1, "data": []amazon.Node{{ID: "ROOT", Kind: "FOLDER", OwnerID: f.OwnerID, Status: "AVAILABLE"}}})
@@ -215,7 +221,7 @@ func (f *Fake) serveAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(r.URL.Path, "/contentRedirection"):
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/drive/v1/nodes/"), "/contentRedirection")
 		if q.Get("querySuffix") != "?download=true" || q.Get("ownerId") != f.OwnerID {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"message": "bad download params"})
+			f.bad(w, "bad download params")
 			return
 		}
 		if f.Forbidden[id] {
@@ -225,6 +231,12 @@ func (f *Fake) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if _, ok := f.Content[id]; !ok {
 			writeJSON(w, http.StatusNotFound, map[string]any{"message": "not found"})
 			return
+		}
+		if f.ExpireAfter > 0 {
+			f.ExpireAfter--
+			if f.ExpireAfter == 0 {
+				f.ValidAT = "revoked-" + f.ValidAT
+			}
 		}
 		http.Redirect(w, r, f.cdnURL()+"/content/"+url.PathEscape(id)+"?sig=abc", http.StatusFound)
 	default:
@@ -238,18 +250,18 @@ func (f *Fake) search(w http.ResponseWriter, q url.Values) {
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	if limit <= 0 || limit > MaxLimit {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "bad limit"})
+		f.bad(w, "bad limit")
 		return
 	}
 	if offset+limit > MaxWindow {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "Offset + limit cannot be greater than 9999"})
+		f.bad(w, "Offset + limit cannot be greater than 9999")
 		return
 	}
 	year, month, day := 0, 0, 0
 	for _, clause := range strings.Split(q.Get("filters"), " AND ") {
 		m := filterRE.FindStringSubmatch(strings.TrimSpace(clause))
 		if m == nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"message": "malformed filter: " + clause})
+			f.bad(w, "malformed filter: "+clause)
 			return
 		}
 		n, _ := strconv.Atoi(m[2])
@@ -262,7 +274,7 @@ func (f *Fake) search(w http.ResponseWriter, q url.Values) {
 		case "timeDay":
 			day = n
 		default:
-			writeJSON(w, http.StatusBadRequest, map[string]any{"message": "unknown filter " + m[1]})
+			f.bad(w, "unknown filter "+m[1])
 			return
 		}
 	}
@@ -310,12 +322,30 @@ func (f *Fake) serveCDN(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+id+`"`)
 	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+	if f.TruncateTimes[id] > 0 {
+		f.TruncateTimes[id]--
+		w.Write(content[:len(content)/2])
+		panic(http.ErrAbortHandler)
+	}
 	if f.Truncate[id] {
 		w.Write(content[:len(content)/2])
 		panic(http.ErrAbortHandler) // drop the connection mid-body
 	}
+	if f.Stall[id] {
+		w.Write(content[:len(content)/2])
+		w.(http.Flusher).Flush()
+		f.mu.Unlock()
+		<-r.Context().Done()
+		f.mu.Lock()
+		return
+	}
 	w.Write(content)
 	f.Downloads[id]++
+}
+
+func (f *Fake) bad(w http.ResponseWriter, msg string) {
+	f.BadRequests++
+	writeJSON(w, http.StatusBadRequest, map[string]any{"message": msg})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

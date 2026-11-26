@@ -29,6 +29,9 @@ type Options struct {
 	Store     *Store
 	Retries   int           // retries after the first attempt; default 5
 	RetryBase time.Duration // first backoff delay, doubled each retry; default 2s
+	// IdleTimeout aborts a download that receives no data for this long;
+	// default 2 minutes.
+	IdleTimeout time.Duration
 }
 
 type Client struct {
@@ -38,6 +41,7 @@ type Client struct {
 	userAgent string
 	retries   int
 	retryBase time.Duration
+	idle      time.Duration
 	allowed   func(*url.URL) bool
 
 	rootMu sync.Mutex
@@ -88,6 +92,10 @@ func NewClient(o Options) (*Client, error) {
 	}
 	if c.retryBase <= 0 {
 		c.retryBase = 2 * time.Second
+	}
+	c.idle = o.IdleTimeout
+	if c.idle <= 0 {
+		c.idle = 2 * time.Minute
 	}
 	j := &jar{store: o.Store, domain: domain}
 	c.allowed = j.allowed
