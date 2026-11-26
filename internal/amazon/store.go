@@ -241,3 +241,6 @@ func (j *jar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 		}
 	}
 }
+
+// Path is the file the store persists to.
+func (s *Store) Path() string { return s.path }
