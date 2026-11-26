@@ -1,0 +1,20 @@
+services:
+  amazon-photos-backup:
+    build: .
+    image: amazon-photos-backup:latest
+    container_name: amazon-photos-backup
+    restart: unless-stopped
+    # Run as your own user so that the photos belong to you on the host.
+    # Find your ids with `id -u` and `id -g`.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      SYNC_INTERVAL: 6h
+      DOWNLOAD_CONCURRENCY: "4"
+      TZ: Europe/Paris
+      # NOTIFY_URL: https://ntfy.sh/un-sujet-secret
+    volumes:
+      # ./data/photos : the backup.  ./data/state : session cookies, index, status.
+      - ./data:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
