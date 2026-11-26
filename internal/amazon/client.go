@@ -23,6 +23,24 @@ const DefaultUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KH
 
 const sessionHeader = "x-amzn-sessionid"
 
+// StatusError is an HTTP answer that is neither success nor an auth failure.
+type StatusError struct {
+	Op   string
+	Code int
+	Body string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s: HTTP %d %s", e.Op, e.Code, e.Body)
+}
+
+// Permanent reports whether err is a refusal that repeating the request
+// will not change (a 4xx other than a rate limit).
+func Permanent(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code >= 400 && se.Code < 500 && se.Code != http.StatusTooManyRequests
+}
+
 type Options struct {
 	BaseURL   string // e.g. https://www.amazon.fr
 	UserAgent string

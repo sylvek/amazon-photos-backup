@@ -316,4 +316,14 @@ func TestSyncForbiddenFileDoesNotStopOthers(t *testing.T) {
 	if res.Downloaded != 1 || res.Failed != 1 {
 		t.Fatalf("%+v", res)
 	}
+	// A refusal is final: asking again would only slow the run down.
+	attempts := 0
+	for _, r := range e.fake.RequestLog() {
+		if strings.Contains(r.Path, "/nodes/id-a/contentRedirection") {
+			attempts++
+		}
+	}
+	if attempts != 1 {
+		t.Errorf("forbidden download attempted %d times, want 1", attempts)
+	}
 }

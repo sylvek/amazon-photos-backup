@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"amazon-photos-backup/internal/amazon"
@@ -34,8 +33,15 @@ type Request struct {
 	Header http.Header
 }
 
+// TB is the part of testing.TB the fake needs; a small program can supply
+// its own to run the fake outside of tests.
+type TB interface {
+	Errorf(format string, args ...any)
+	Cleanup(func())
+}
+
 type Fake struct {
-	t testing.TB
+	t TB
 
 	mu                sync.Mutex
 	Nodes             []amazon.Node
@@ -60,7 +66,7 @@ type Fake struct {
 	api, cdn *httptest.Server
 }
 
-func New(t testing.TB) *Fake {
+func New(t TB) *Fake {
 	f := &Fake{
 		t:             t,
 		Content:       map[string][]byte{},

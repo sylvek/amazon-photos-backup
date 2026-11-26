@@ -32,7 +32,7 @@ func (c *Client) Download(ctx context.Context, n Node, w io.Writer) (int64, erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("download %s: HTTP %d %s", n.ID, resp.StatusCode, snippet(resp.Body))
+		return 0, &StatusError{Op: "download " + n.ID, Code: resp.StatusCode, Body: snippet(resp.Body)}
 	}
 
 	// Cut the transfer if no data arrives for a while, so that one hung

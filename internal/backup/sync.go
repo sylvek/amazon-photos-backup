@@ -277,7 +277,7 @@ func (s *Syncer) fetchWithRetry(ctx context.Context, j job) (int64, error) {
 		if err == nil {
 			return written, nil
 		}
-		if errors.Is(err, amazon.ErrAuth) || ctx.Err() != nil {
+		if errors.Is(err, amazon.ErrAuth) || amazon.Permanent(err) || ctx.Err() != nil {
 			return 0, err
 		}
 	}
