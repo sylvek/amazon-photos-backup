@@ -2,6 +2,7 @@ package amazon
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -156,10 +157,19 @@ func NewClient(o Options) (*Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = 90 * time.Second
 	// HTTP/1.1 only: Amazon's HTTP/2 servers send frames after closing
-	// streams, which Go reports as protocol errors on stderr.
+	// streams, which Go reports as protocol errors on stderr. Both sides
+	// of the choice must agree: what the transport speaks, and what TLS
+	// offers the server (a clone of the default transport may already
+	// offer "h2", and the server would then answer in HTTP/2).
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	transport.Protocols = protocols
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	}
+	transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	c.http = &http.Client{
 		Jar:       j,
 		Transport: transport,
