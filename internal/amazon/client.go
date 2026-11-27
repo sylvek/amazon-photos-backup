@@ -155,6 +155,11 @@ func NewClient(o Options) (*Client, error) {
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = 90 * time.Second
+	// HTTP/1.1 only: Amazon's HTTP/2 servers send frames after closing
+	// streams, which Go reports as protocol errors on stderr.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	transport.Protocols = protocols
 	c.http = &http.Client{
 		Jar:       j,
 		Transport: transport,
