@@ -1,9 +1,12 @@
-FROM golang:1.24-alpine AS build
+# The build stage runs on the builder's own architecture and cross-compiles,
+# so multi-platform images need no emulation.
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS build
+ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod ./
 COPY main.go ./
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/amazon-photos-backup . \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/amazon-photos-backup . \
  && mkdir -p /out/data/photos /out/data/state
 
 # Static binary on a minimal base: CA certificates and time zones, no shell.

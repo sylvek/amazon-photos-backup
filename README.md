@@ -48,7 +48,16 @@ service ne pourra pas y écrire.
 `document.cookie` dans la console ne suffit pas : le cookie d'authentification
 (`at-acbfr`) est `HttpOnly` et n'y apparaît pas.
 
-### 3. Construire l'image et se connecter
+### 3. Récupérer l'image et se connecter
+
+L'image est publiée par la CI sur `ghcr.io/sylvek/amazon-photos-backup`
+(amd64 et arm64) :
+
+```bash
+docker compose pull
+```
+
+Ou, pour la construire vous-même à partir des sources :
 
 ```bash
 docker compose build
@@ -179,3 +188,10 @@ go run ./internal/amazon/amazontest/fakeserver
 ```
 
 Il affiche une valeur pour `AMAZON_BASE_URL` et des cookies qu'il accepte.
+
+### Intégration continue
+
+`.github/workflows/ci.yml` lance le formatage, `go vet` et les tests sur
+chaque push et chaque pull request. Sur `main`, l'image est publiée avec le
+tag `latest` ; un tag git `v1.2.3` publie en plus `1.2.3` et `1.2`. Les pull
+requests construisent l'image sans la publier.

@@ -1,7 +1,9 @@
 services:
   amazon-photos-backup:
+    # `docker compose pull` fetches the image published by CI;
+    # `docker compose build` builds it from this checkout instead.
+    image: ghcr.io/sylvek/amazon-photos-backup:latest
     build: .
-    image: amazon-photos-backup:latest
     container_name: amazon-photos-backup
     restart: unless-stopped
     # Run as your own user so that the photos belong to you on the host.
