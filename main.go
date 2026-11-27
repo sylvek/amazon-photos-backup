@@ -165,7 +165,7 @@ func printStatus(cfg daemon.Config) int {
 		}
 		return fmt.Sprintf("%s (%s ago)", t.Local().Format("2006-01-02 15:04:05"), time.Since(t).Round(time.Second))
 	}
-	fmt.Printf("State:           %s\n", st.State)
+	fmt.Printf("State:           %s\n", st.Summary())
 	fmt.Printf("Last run start:  %s\n", when(st.LastRunStart))
 	fmt.Printf("Last success:    %s\n", when(st.LastSuccess))
 	r := st.LastResult
@@ -175,7 +175,11 @@ func printStatus(cfg daemon.Config) int {
 		fmt.Printf("                 %d saved although Amazon's checksum disagrees with the bytes it serves (see logs)\n", r.Mismatched)
 	}
 	if st.LastError != "" {
-		fmt.Printf("Last error:      %s\n", st.LastError)
+		label := "Last error:      "
+		if st.Running {
+			label = "Previous error:  "
+		}
+		fmt.Printf("%s%s\n", label, st.LastError)
 	}
 	store := amazon.NewStore(cfg.StateDir + "/cookies.json")
 	if err := store.Load(); err != nil {

@@ -24,6 +24,7 @@ const (
 // status.json for the status and healthcheck commands.
 type Status struct {
 	State        string        `json:"state"`
+	Running      bool          `json:"running"` // a backup run is in progress right now
 	Started      time.Time     `json:"started"`
 	Updated      time.Time     `json:"updated"`
 	LastRunStart time.Time     `json:"last_run_start"`
@@ -71,6 +72,20 @@ func saveStatus(cfg Config, st Status) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), filepath.Join(cfg.StateDir, "status.json"))
+}
+
+// Summary is the state as a person should read it. After a failure the
+// state stays "error" (or "auth_required") until a run succeeds, so that
+// the healthcheck does not turn green during every retry; the summary says
+// when such a retry is in progress.
+func (s Status) Summary() string {
+	switch {
+	case s.State == StateSyncing && s.LastSuccess.IsZero():
+		return "syncing (first backup)"
+	case s.Running && (s.State == StateError || s.State == StateAuthRequired):
+		return s.State + " (previous run failed; a new run is running)"
+	}
+	return s.State
 }
 
 // Healthcheck returns an error when the backup needs attention: the session

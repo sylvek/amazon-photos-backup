@@ -210,10 +210,13 @@ func (d *Daemon) runCycle(ctx context.Context) (backup.Result, error) {
 		d.status.State = StateSyncing
 	}
 	d.status.LastRunStart = time.Now().UTC()
+	d.status.Running = true
 	d.saveStatus()
 
 	res, err := d.cycle(ctx)
+	d.status.Running = false
 	if ctx.Err() != nil {
+		d.saveStatus()
 		return res, ctx.Err()
 	}
 	switch {

@@ -435,3 +435,42 @@ func TestConcurrentBackupRefused(t *testing.T) {
 		t.Fatalf("got %v, want ErrBusy", err)
 	}
 }
+
+func TestStatusShowsRunInProgressAfterFailure(t *testing.T) {
+	f := amazontest.New(t)
+	f.AddNode("id-a", "a.jpg", "2023-05-01T10:00:00Z", bytes.Repeat([]byte("A"), 100000))
+	cfg := testConfig(t, f)
+	if _, err := Once(context.Background(), cfg, quiet); err == nil {
+		t.Fatal("expected the first run to fail: no cookies yet")
+	}
+	login(t, cfg, f.Cookies())
+	f.Stall["id-a"] = true // keeps the next run busy
+
+	startDaemon(t, cfg)
+	waitFor(t, "run in progress", func() bool {
+		st, err := LoadStatus(cfg)
+		return err == nil && st.Running
+	})
+	st, _ := LoadStatus(cfg)
+	if st.State != StateAuthRequired {
+		t.Errorf("state = %q, want the failure kept until a run succeeds", st.State)
+	}
+	summary := st.Summary()
+	if !strings.Contains(summary, "running") || !strings.Contains(summary, "previous run") {
+		t.Errorf("summary %q does not say a new run is in progress after a failed one", summary)
+	}
+}
+
+func TestStatusSummary(t *testing.T) {
+	cases := map[string]Status{
+		"ok":                     {State: StateOK},
+		"syncing (first backup)": {State: StateSyncing, Running: true},
+		"auth_required":          {State: StateAuthRequired},
+		"error (previous run failed; a new run is running)": {State: StateError, Running: true},
+	}
+	for want, st := range cases {
+		if got := st.Summary(); got != want {
+			t.Errorf("Summary(%+v) = %q, want %q", st, got, want)
+		}
+	}
+}
