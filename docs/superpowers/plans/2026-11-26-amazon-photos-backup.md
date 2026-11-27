@@ -117,7 +117,7 @@ Loop: reload cookies if the file changed → keep-alive → sync → save cookie
 ### Task 6: Packaging and documentation
 
 **Files:**
-- Create: `Dockerfile`, `docker-compose.yml`, `.dockerignore`, `README.md` (French)
+- Create: `Dockerfile`, `docker-compose.yml`, `.dockerignore`, `README.md`
 
 - [ ] Multi-stage build: `golang:1.24-alpine` → `distroless/static-debian12:nonroot`; `/data/photos` and `/data/state` owned by uid 65532; `VOLUME /data`; `HEALTHCHECK` using the `healthcheck` command.
 - [ ] Compose: `restart: unless-stopped`, volume for `/data`, env defaults.

@@ -1,24 +1,24 @@
 # amazon-photos-backup
 
-Sauvegarde en continu, sur votre disque, l'intégralité de votre bibliothèque
-Amazon Photos (photos et vidéos, originaux en pleine résolution).
+Continuously backs up your whole Amazon Photos library (photos and videos,
+full-resolution originals) to a local disk.
 
-Vous vous authentifiez **une seule fois** en fournissant les cookies de votre
-navigateur. Le service tourne ensuite en tâche de fond dans Docker, conserve
-la session sur disque, et reprend tout seul après un redémarrage.
+You authenticate **once**, by handing over the cookies of your browser
+session. The service then runs in the background in Docker, keeps the session
+on disk, and picks up by itself after a reboot.
 
-> **À savoir.** Amazon Photos n'a pas d'API publique. Ce programme utilise
-> l'API interne du site web, non documentée : elle peut changer sans préavis
-> et casser l'outil. Amazon peut aussi révoquer une session à tout moment
-> (changement de mot de passe, contrôle de sécurité). Dans ce cas le service
-> vous prévient et il faut refaire l'étape « connexion » : aucun outil ne
-> peut garantir une session éternelle.
+> **Good to know.** Amazon Photos has no public API. This program uses the
+> website's internal, undocumented API: it can change without notice and break
+> the tool. Amazon can also revoke a session at any time (password change,
+> security check). When that happens the service tells you, and the "login"
+> step has to be done again: no tool can guarantee a session that lasts
+> forever.
 
-## Démarrage
+## Getting started
 
-Prérequis : Docker avec le plugin Compose.
+Requirement: Docker with the Compose plugin.
 
-### 1. Préparer le dossier
+### 1. Prepare the data directory
 
 ```bash
 mkdir -p data
@@ -28,36 +28,37 @@ mkdir -p data
 printf 'PUID=%s\nPGID=%s\n' "$(id -u)" "$(id -g)" > .env
 ```
 
-Le conteneur tourne avec votre utilisateur : les photos vous appartiennent
-sur l'hôte. Créez bien `data` vous-même, sinon Docker le crée en `root` et le
-service ne pourra pas y écrire.
+The container runs as your own user, so the photos belong to you on the host.
+Do create `data` yourself: otherwise Docker creates it as `root` and the
+service cannot write to it.
 
-### 2. Copier les cookies depuis le navigateur
+### 2. Copy the cookies from your browser
 
-1. Ouvrez une **fenêtre de navigation privée** et connectez-vous sur
-   <https://www.amazon.fr/photos> en cochant « Rester connecté ».
-2. Ouvrez les outils de développement (F12), onglet **Réseau**, puis rechargez
-   la page.
-3. Cliquez sur une requête vers `www.amazon.fr` (par exemple une dont l'URL
-   contient `drive/v1`), puis dans **En-têtes de la requête** copiez la valeur
-   complète de l'en-tête `Cookie`.
-4. Collez-la dans un fichier `cookies.txt`.
-5. Fermez la fenêtre privée **sans vous déconnecter** : se déconnecter
-   invaliderait la session que vous venez de copier.
+1. Open a **private browsing window** and sign in at
+   <https://www.amazon.fr/photos> (or your country's Amazon site) with
+   "Keep me signed in" checked.
+2. Open the developer tools (F12), go to the **Network** tab, and reload the
+   page.
+3. Click a request to `www.amazon.fr` (for instance one whose URL contains
+   `drive/v1`), then under **Request Headers** copy the full value of the
+   `Cookie` header.
+4. Paste it into a file named `cookies.txt`.
+5. Close the private window **without signing out**: signing out would
+   invalidate the session you just copied.
 
-`document.cookie` dans la console ne suffit pas : le cookie d'authentification
-(`at-acbfr`) est `HttpOnly` et n'y apparaît pas.
+`document.cookie` in the console is not enough: the authentication cookie
+(`at-acbfr`) is `HttpOnly` and does not show up there.
 
-### 3. Récupérer l'image et se connecter
+### 3. Get the image and log in
 
-L'image est publiée par la CI sur `ghcr.io/sylvek/amazon-photos-backup`
-(amd64 et arm64) :
+The image is published by CI to `ghcr.io/sylvek/amazon-photos-backup`
+(amd64 and arm64):
 
 ```bash
 docker compose pull
 ```
 
-Ou, pour la construire vous-même à partir des sources :
+Or, to build it yourself from the sources:
 
 ```bash
 docker compose build
@@ -71,20 +72,20 @@ docker compose run --rm -T amazon-photos-backup login < cookies.txt
 rm cookies.txt
 ```
 
-La commande `login` vérifie les cookies auprès d'Amazon avant de les
-enregistrer. S'ils sont refusés, rien n'est écrit.
+The `login` command checks the cookies with Amazon before saving them. If
+they are rejected, nothing is written.
 
-### 4. Lancer le service
+### 4. Start the service
 
 ```bash
 docker compose up -d
 ```
 
-La première sauvegarde démarre aussitôt. Les suivantes ont lieu toutes les
-6 heures. Grâce à `restart: unless-stopped`, le service redémarre avec la
-machine, sans nouvelle connexion.
+The first backup starts right away. The following ones run every 6 hours.
+Thanks to `restart: unless-stopped`, the service comes back with the machine,
+without a new login.
 
-## Suivi
+## Monitoring
 
 ```bash
 docker compose logs -f
@@ -94,104 +95,100 @@ docker compose logs -f
 docker compose exec amazon-photos-backup amazon-photos-backup status
 ```
 
-`docker ps` affiche aussi l'état de santé du conteneur. Il passe à
-`unhealthy` quand la session doit être renouvelée, ou quand aucune sauvegarde
-n'a réussi pendant trois intervalles.
+`docker ps` also shows the container's health. It turns `unhealthy` when the
+session has to be renewed, or when no backup has succeeded for three
+intervals.
 
-| État            | Signification                                                        |
-|-----------------|----------------------------------------------------------------------|
-| `syncing`       | sauvegarde en cours (la première peut durer longtemps)               |
-| `ok`            | tout est sauvegardé                                                  |
-| `degraded`      | sauvegarde terminée, mais certains éléments ont échoué (voir `status`) |
-| `error`         | la dernière sauvegarde n'a pas pu aboutir ; nouvel essai automatique |
-| `auth_required` | Amazon refuse la session : il faut refaire la connexion              |
+| State           | Meaning                                                           |
+|-----------------|-------------------------------------------------------------------|
+| `syncing`       | a backup is running (the first one can take a long time)          |
+| `ok`            | everything is backed up                                           |
+| `degraded`      | the backup finished, but some items failed (see `status`)         |
+| `error`         | the last backup could not complete; it is retried automatically   |
+| `auth_required` | Amazon rejects the session: the login step must be done again     |
 
-## Quand la session expire
+## When the session expires
 
-Le service journalise l'erreur, passe en `auth_required`, envoie une
-notification si `NOTIFY_URL` est défini, et attend. Refaites les étapes 2 et 3
-(`cookies.txt` puis `login`) : le service en cours d'exécution détecte les
-nouveaux cookies en moins de 30 secondes et reprend là où il s'était arrêté.
-Inutile de le redémarrer.
+The service logs the error, switches to `auth_required`, sends a notification
+if `NOTIFY_URL` is set, and waits. Repeat steps 2 and 3 (`cookies.txt`, then
+`login`): the running service notices the new cookies within 30 seconds and
+resumes where it stopped. There is no need to restart it.
 
 ## Configuration
 
-Variables d'environnement, à régler dans `docker-compose.yml` :
+Environment variables, set in `docker-compose.yml`:
 
-| Variable               | Défaut         | Rôle                                                            |
-|------------------------|----------------|-----------------------------------------------------------------|
-| `SYNC_INTERVAL`        | `6h`           | pause entre deux sauvegardes (minimum `5m`)                     |
-| `DOWNLOAD_CONCURRENCY` | `4`            | téléchargements simultanés (1 à 16)                             |
-| `NOTIFY_URL`           | —              | webhook d'alerte : `POST` en texte brut, compatible [ntfy](https://ntfy.sh) |
-| `AMAZON_TLD`           | selon cookies  | site Amazon : `fr`, `de`, `co.uk`, `com`…                       |
-| `USER_AGENT`           | Chrome/Linux   | User-Agent présenté à Amazon (idéalement celui de votre navigateur) |
-| `TZ`                   | `Europe/Paris` | fuseau horaire des journaux                                     |
-| `LOG_LEVEL`            | `info`         | `debug`, `info`, `warn`, `error`                                |
+| Variable               | Default        | Purpose                                                              |
+|------------------------|----------------|----------------------------------------------------------------------|
+| `SYNC_INTERVAL`        | `6h`           | pause between two backups (minimum `5m`)                             |
+| `DOWNLOAD_CONCURRENCY` | `4`            | simultaneous downloads (1 to 16)                                     |
+| `NOTIFY_URL`           | —              | alert webhook: plain-text `POST`, compatible with [ntfy](https://ntfy.sh) |
+| `AMAZON_TLD`           | from cookies   | Amazon site: `fr`, `de`, `co.uk`, `com`…                             |
+| `USER_AGENT`           | Chrome/Linux   | User-Agent presented to Amazon (ideally your browser's)              |
+| `TZ`                   | `Europe/Paris` | time zone of the logs                                                |
+| `LOG_LEVEL`            | `info`         | `debug`, `info`, `warn`, `error`                                     |
 
-## Ce que fait le service
+## What the service does
 
-- **Rangement** : `data/photos/AAAA/MM/<nom d'origine>`, d'après la date de
-  prise de vue (à défaut, la date d'envoi ; sinon `unknown/`). La date de
-  modification du fichier est celle de la prise de vue.
-- **Incrémental** : un fichier déjà sauvegardé n'est jamais retéléchargé.
-- **Vérifié** : chaque téléchargement est contrôlé (taille et MD5 annoncés par
-  Amazon) avant de recevoir son nom définitif. Un téléchargement interrompu ne
-  laisse pas de fichier incomplet sous un nom de photo (après une coupure de
-  courant, il peut rester un fichier caché `.dl-…`, sans danger, à supprimer).
-  Si Amazon sert deux fois de suite les mêmes octets alors qu'ils ne
-  correspondent pas au MD5 annoncé, le fichier est conservé et signalé
-  (`mismatched`) plutôt que jeté.
-- **Prudent en cas de panne** : disque plein ou volume en lecture seule
-  arrêtent la sauvegarde avec une erreur, au lieu de compter chaque fichier
-  comme « échoué ». Si 20 téléchargements échouent d'affilée, la passe
-  s'arrête et l'état passe à `error`.
-- **Jamais destructeur** : rien n'est supprimé ni écrasé en local. Une photo
-  supprimée sur Amazon reste dans la sauvegarde. Si deux photos portent le
-  même nom, ou si une photo est modifiée sur Amazon, la nouvelle est rangée à
-  côté avec un suffixe (`IMG_0001_AbCd1234.jpg`).
-- **Réparable** : si un fichier sauvegardé est supprimé localement, il est
-  retéléchargé. Si l'index (`data/state/index.json`) est perdu, les fichiers
-  présents sont reconnus par leur MD5 au lieu d'être retéléchargés.
+- **Layout**: `data/photos/YYYY/MM/<original name>`, from the date the photo
+  was taken (failing that, the upload date; otherwise `unknown/`). The file's
+  modification time is set to the date it was taken.
+- **Incremental**: a file that is already backed up is never downloaded again.
+- **Verified**: every download is checked (size and MD5 announced by Amazon)
+  before it gets its final name. An interrupted download leaves no incomplete
+  file under a photo's name (after a power cut, a harmless hidden `.dl-…`
+  file may remain and can be deleted). If Amazon serves the same bytes twice
+  in a row although they do not match the announced MD5, the file is kept and
+  flagged (`mismatched`) rather than thrown away.
+- **Careful when things break**: a full disk or a read-only volume stops the
+  backup with an error, instead of counting every file as "failed". If 20
+  downloads fail in a row, the run stops and the state becomes `error`.
+- **Never destructive**: nothing is ever deleted or overwritten locally. A
+  photo deleted on Amazon stays in the backup. If two photos share a name, or
+  if a photo is modified on Amazon, the new one is stored next to the other
+  with a suffix (`IMG_0001_AbCd1234.jpg`).
+- **Self-repairing**: a backed-up file that is deleted locally is downloaded
+  again. If the index (`data/state/index.json`) is lost, the files already
+  present are recognised by their MD5 instead of being downloaded again.
 
-## Sécurité
+## Security
 
-- `data/state/cookies.json` donne accès à votre compte Amazon. Il est créé en
-  mode `0600` ; ne le partagez pas et ne le versionnez pas.
-- Les cookies ne sont envoyés qu'à `amazon.<tld>` et ses sous-domaines, jamais
-  aux serveurs de contenu vers lesquels Amazon redirige les téléchargements.
-- Le conteneur tourne sans privilèges, en lecture seule hors de `/data`.
+- `data/state/cookies.json` gives access to your Amazon account. It is created
+  with mode `0600`; do not share it and do not commit it.
+- Cookies are only ever sent to `amazon.<tld>` and its subdomains, never to
+  the content servers Amazon redirects downloads to.
+- The container runs unprivileged, with a read-only filesystem outside
+  `/data`.
 
-## Limites connues
+## Known limits
 
-- L'API de recherche d'Amazon ne renvoie pas plus de 9999 éléments par
-  requête. Les grandes bibliothèques sont donc parcourues par année, puis par
-  mois, puis par jour. Plus de 9999 éléments sur une même journée ne peuvent
-  pas tous être listés : le service le signale (`unreachable`) au lieu de
-  l'ignorer.
-- Seule votre propre bibliothèque est sauvegardée (pas l'espace famille des
-  autres membres).
-- Le programme n'a pu être testé que contre un faux serveur Amazon inclus dans
-  les tests ; voyez « Développement ».
+- Amazon's search API returns at most 9999 items per query. Large libraries
+  are therefore walked by year, then by month, then by day. More than 9999
+  items on a single day cannot all be listed: the service reports them
+  (`unreachable`) instead of ignoring them.
+- Only your own library is backed up (not other members' family vault).
+- The program could only be tested against a fake Amazon server included in
+  the tests; see "Development".
 
-## Développement
+## Development
 
-Go 1.24, bibliothèque standard uniquement.
+Go 1.24, standard library only.
 
 ```bash
 go test ./...
 ```
 
-Pour essayer le service sans compte Amazon, un faux serveur est fourni :
+A fake server is provided to try the service without an Amazon account:
 
 ```bash
 go run ./internal/amazon/amazontest/fakeserver
 ```
 
-Il affiche une valeur pour `AMAZON_BASE_URL` et des cookies qu'il accepte.
+It prints a value for `AMAZON_BASE_URL` and cookies it accepts.
 
-### Intégration continue
+### Continuous integration
 
-`.github/workflows/ci.yml` lance le formatage, `go vet` et les tests sur
-chaque push et chaque pull request. Sur `main`, l'image est publiée avec le
-tag `latest` ; un tag git `v1.2.3` publie en plus `1.2.3` et `1.2`. Les pull
-requests construisent l'image sans la publier.
+`.github/workflows/ci.yml` runs the formatting check, `go vet` and the tests
+on every push and pull request. On `main`, the image is published with the
+`latest` tag; a git tag `v1.2.3` additionally publishes `1.2.3` and `1.2`.
+Pull requests build the image without publishing it.

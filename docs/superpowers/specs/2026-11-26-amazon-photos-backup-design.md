@@ -1,103 +1,100 @@
 # Amazon Photos Backup — design
 
-## Intention
+## Intent
 
-Sauvegarder sur un disque local l'intégralité d'une bibliothèque Amazon Photos
-(amazon.fr), en continu et sans intervention : on s'authentifie une fois, puis
-le service tourne en tâche de fond et survit aux redémarrages.
+Back up a whole Amazon Photos library (amazon.fr) to a local disk,
+continuously and unattended: authenticate once, then the service runs in the
+background and survives reboots.
 
-## Objectifs
+## Goals
 
-- Télécharger les originaux (photos et vidéos) en pleine résolution.
-- Incrémental : un fichier déjà sauvegardé n'est jamais retéléchargé.
-- Une seule authentification manuelle ; la session est conservée sur disque et
-  entretenue par le service.
-- Livré comme une image Docker autonome (`docker compose up -d`).
+- Download the originals (photos and videos) in full resolution.
+- Incremental: a file that is already backed up is never downloaded again.
+- A single manual authentication; the session is kept on disk and maintained
+  by the service.
+- Delivered as a self-contained Docker image (`docker compose up -d`).
 
-## Hors périmètre
+## Non-goals
 
-- macOS natif (abandonné à la demande de l'utilisateur) : Docker uniquement.
-- Envoi vers Amazon, suppression côté Amazon, albums, synchronisation
-  bidirectionnelle.
-- Interface web.
+- Native macOS (dropped at the user's request): Docker only.
+- Uploading to Amazon, deleting on Amazon, albums, two-way synchronisation.
+- A web interface.
 
-## Anti-objectifs
+## Anti-goals
 
-- Supprimer ou écraser un fichier local parce qu'il a disparu ou changé côté
-  Amazon. Une sauvegarde ne perd jamais de données.
-- Envoyer les cookies de session ailleurs que sur `amazon.<tld>`.
-- Échouer en silence quand la session a expiré.
+- Deleting or overwriting a local file because it disappeared or changed on
+  Amazon. A backup never loses data.
+- Sending session cookies anywhere other than `amazon.<tld>`.
+- Failing silently when the session has expired.
 
-## Contraintes
+## Constraints
 
-- Amazon Photos n'a pas d'API publique. On utilise l'API interne du site web
-  (`https://www.amazon.fr/drive/v1`), authentifiée par les cookies du
-  navigateur. Non documentée : peut casser sans préavis.
-- La recherche est plafonnée : `offset + limit <= 9999`, 200 éléments par page.
-- « Connecté pour toujours » ne peut pas être garanti : Amazon peut révoquer
-  la session. Le service doit alors le signaler clairement et reprendre dès
-  que de nouveaux cookies sont fournis.
+- Amazon Photos has no public API. We use the website's internal API
+  (`https://www.amazon.fr/drive/v1`), authenticated by the browser's cookies.
+  Undocumented: it can break without notice.
+- Search is capped: `offset + limit <= 9999`, 200 items per page.
+- "Logged in forever" cannot be guaranteed: Amazon can revoke the session.
+  The service must then say so clearly and resume as soon as new cookies are
+  provided.
 
-## Approches envisagées
+## Approaches considered
 
-1. **Cookies du navigateur + API interne** (retenue). L'utilisateur colle une
-   fois l'en-tête `Cookie` copié depuis son navigateur. Simple, pas de
-   navigateur embarqué, image de quelques Mo.
-2. **Navigateur headless dans le conteneur** qui se connecte avec
-   identifiant/mot de passe. Écartée : captcha et 2FA d'Amazon rendent la
-   connexion automatique fragile, il faudrait stocker le mot de passe, et
-   l'image pèserait ~1 Go.
-3. **Enregistrement en tant qu'appareil** (jeton de rafraîchissement façon
-   appli mobile). Écartée : repose sur des identifiants d'application
-   Amazon rétro-conçus, sans certitude que l'API Photos web accepte ces jetons.
+1. **Browser cookies + internal API** (chosen). The user pastes, once, the
+   `Cookie` header copied from their browser. Simple, no embedded browser, an
+   image of a few MB.
+2. **Headless browser in the container** signing in with username and
+   password. Rejected: Amazon's captcha and 2FA make automated sign-in
+   fragile, the password would have to be stored, and the image would weigh
+   about 1 GB.
+3. **Registering as a device** (refresh token, mobile-app style). Rejected:
+   it relies on reverse-engineered Amazon application identifiers, with no
+   certainty that the Photos web API accepts those tokens.
 
 ## Design
 
-Choix du constructeur (non décidés par l'utilisateur) : **Go, bibliothèque
-standard uniquement**, binaire statique, image `distroless`.
+Builder's choices (not decided by the user): **Go, standard library only**,
+static binary, `distroless` image.
 
-**Commandes** : `run` (démon, par défaut), `login` (importe les cookies depuis
-stdin ou un fichier, les valide, les enregistre), `once` (une passe),
-`status`, `healthcheck`.
+**Commands**: `run` (daemon, default), `login` (imports cookies from stdin or
+a file, validates them, saves them), `once` (a single pass), `status`,
+`healthcheck`.
 
-**Session** : les cookies sont stockés dans `/data/state/cookies.json`
-(mode 0600). Un pot à cookies maison n'envoie les cookies qu'aux hôtes
-`amazon.<tld>`, applique les `Set-Cookie` reçus et les réécrit sur disque.
-Chaque cycle commence par une visite de `/photos/` pour entretenir la
-session. Le démon relit le fichier s'il a été modifié par `login`.
+**Session**: cookies are stored in `/data/state/cookies.json` (mode 0600). A
+purpose-built cookie jar only sends cookies to `amazon.<tld>` hosts, applies
+the `Set-Cookie` headers it receives and writes them back to disk. Every cycle
+starts with a visit to `/photos/` to keep the session alive. The daemon
+re-reads the file when `login` has changed it.
 
-**Inventaire** : `GET /drive/v1/search` avec le filtre
-`type:(PHOTOS OR VIDEOS)`. Si le total dépasse 9999, découpage par
-`timeYear`, puis `timeMonth`, puis `timeDay`. Le total des partitions est
-comparé au total global ; tout écart est journalisé et complété par les 9999
-éléments les plus récents.
+**Inventory**: `GET /drive/v1/search` with the filter
+`type:(PHOTOS OR VIDEOS)`. If the total exceeds 9999, it is split by
+`timeYear`, then `timeMonth`, then `timeDay`. The sum of the slices is
+compared with the overall total; any gap is logged and filled with the 9999
+most recent items.
 
-**Téléchargement** : `GET /drive/v1/nodes/{id}/contentRedirection?querySuffix=?download=true&ownerId=…`,
-écrit dans `<fichier>.part`, MD5 et taille vérifiés contre les métadonnées,
-puis renommage atomique et date de modification = date de prise de vue.
-4 téléchargements en parallèle par défaut, reprises avec backoff.
+**Download**: `GET /drive/v1/nodes/{id}/contentRedirection?querySuffix=?download=true&ownerId=…`,
+written to a temporary file, size and MD5 checked against the metadata, then
+an atomic rename and modification time = date taken. 4 parallel downloads by
+default, retries with backoff.
 
-**Rangement** : `/data/photos/AAAA/MM/<nom d'origine>`. En cas de collision
-de nom, suffixe `_<8 premiers caractères de l'id>`. Si le contenu d'un
-élément change côté Amazon, la nouvelle version est ajoutée à côté de
-l'ancienne.
+**Layout**: `/data/photos/YYYY/MM/<original name>`. On a name collision, a
+`_<first 8 characters of the id>` suffix. If an item's content changes on
+Amazon, the new version is added next to the old one.
 
-**Index** : `/data/state/index.json` (id → chemin, md5, taille), écrit de
-façon atomique. Si l'index est perdu, un fichier déjà présent avec le bon MD5
-est réadopté sans retéléchargement.
+**Index**: `/data/state/index.json` (id → path, md5, size), written
+atomically. If the index is lost, a file already present with the right MD5
+is re-adopted without downloading it again.
 
-**Session expirée** : détectée par HTTP 401/403, redirection vers
-`/ap/signin` ou réponse HTML à la place du JSON. Le démon passe en état
-`auth_required`, envoie une notification (webhook `NOTIFY_URL`, optionnel),
-marque le conteneur `unhealthy`, et reprend dès que `login` a fourni de
-nouveaux cookies.
+**Expired session**: detected by HTTP 401/403, a redirect to `/ap/signin`, or
+an HTML answer in place of JSON. The daemon switches to `auth_required`,
+sends a notification (`NOTIFY_URL` webhook, optional), marks the container
+`unhealthy`, and resumes as soon as `login` has provided new cookies.
 
-**Configuration** (variables d'environnement) : `SYNC_INTERVAL` (6h),
+**Configuration** (environment variables): `SYNC_INTERVAL` (6h),
 `DOWNLOAD_CONCURRENCY` (4), `BACKUP_DIR`, `STATE_DIR`, `AMAZON_TLD`
-(déduit des cookies), `USER_AGENT`, `NOTIFY_URL`.
+(derived from the cookies), `USER_AGENT`, `NOTIFY_URL`.
 
-## Vérification
+## Verification
 
-Tests Go contre un faux serveur Amazon (pagination, plafond 9999,
-redirection de téléchargement, rotation de cookies, expiration de session).
-La validation contre le vrai service ne peut se faire que chez l'utilisateur.
+Go tests against a fake Amazon server (paging, the 9999 cap, download
+redirects, cookie rotation, session expiry). Validation against the real
+service can only happen on the user's side.

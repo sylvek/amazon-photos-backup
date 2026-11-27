@@ -13,7 +13,7 @@ services:
       SYNC_INTERVAL: 6h
       DOWNLOAD_CONCURRENCY: "4"
       TZ: Europe/Paris
-      # NOTIFY_URL: https://ntfy.sh/un-sujet-secret
+      # NOTIFY_URL: https://ntfy.sh/a-secret-topic
     volumes:
       # ./data/photos : the backup.  ./data/state : session cookies, index, status.
       - ./data:/data
